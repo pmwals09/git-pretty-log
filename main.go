@@ -9,6 +9,7 @@ import (
 	"os"
 	"slices"
 	"strings"
+	"sync"
 
 	"github.com/fatih/color"
 	"github.com/go-git/go-git/v5"
@@ -17,6 +18,12 @@ import (
 	"github.com/jedib0t/go-pretty/v6/table"
 	"github.com/maniartech/gotime"
 )
+
+type result struct {
+	index int
+	err   error
+	row   *table.Row
+}
 
 func main() {
 	// make sure we're in some repository
@@ -49,10 +56,12 @@ func main() {
 		return nil
 	})
 
-	table := getTableWriter()
+	tw := getTableWriter()
 
 	// start walking back 30 commits
 	log, err := repo.Log(&git.LogOptions{})
+	var wg sync.WaitGroup
+	results := make(chan result, args.numberCommits)
 	for i := 0; i < args.numberCommits; i++ {
 		commit, err := log.Next()
 		if err != nil {
@@ -63,19 +72,55 @@ func main() {
 				break
 			}
 		}
+		wg.Add(1)
 
-		// if commit contains master, produce a diff
-		if contains, err := commitContainsCommit(commit, args.baseCommit); err != nil {
-			fmt.Fprintf(os.Stderr, "error getting ancestry: %s\n", err.Error())
-			os.Exit(1)
-		} else if contains {
-			printCommitWithDiff(commit, args.baseCommit, &table, refHashToName)
+		go func(idx int, commit *object.Commit) {
+			defer wg.Done()
+			// if commit contains master, produce a diff
+			if contains, err := commitContainsCommit(commit, args.baseCommit); err != nil {
+				row := table.Row{"error getting ancestry"}
+				results <- result{
+					index: i,
+					err:   fmt.Errorf("error getting ancestry: %w", err),
+					row:   &row}
+			} else if contains {
+				row := printCommitWithDiff(commit, args.baseCommit, refHashToName)
+				results <- result{
+					err:   nil,
+					index: i,
+					row:   &row}
+			} else {
+				row := printCommit(commit, refHashToName)
+				results <- result{
+					err:   nil,
+					index: i,
+					row:   &row}
+			}
+		}(i, commit)
+	}
+	wg.Wait()
+	close(results)
+
+	outputs := make([]result, 0)
+	var processingErrors error
+	for processed := range results {
+		if processed.err != nil {
+			processingErrors = errors.Join(processingErrors, processed.err)
+			outputs = append(outputs, processed)
 		} else {
-			printCommit(commit, &table, refHashToName)
+			outputs = append(outputs, processed)
 		}
 	}
 
-	table.Render()
+	slices.SortFunc(outputs, func(a result, b result) int {
+		return a.index - b.index
+	})
+	rows := make([]table.Row, 0)
+	for _, output := range outputs {
+		rows = append(rows, *output.row)
+	}
+	tw.AppendRows(rows)
+	tw.Render()
 }
 
 func getRepo() (*git.Repository, error) {
@@ -190,22 +235,28 @@ func getTableWriter() table.Writer {
 	return t
 }
 
-func printCommit(commit *object.Commit, tw *table.Writer, refHashToName map[string][]string) {
+func printCommit(
+	commit *object.Commit,
+	refHashToName map[string][]string,
+) table.Row {
 	hash := prettyHash(commit)
 	relTime := prettyRelativeTime(commit)
 	author := prettyAuthor(commit)
 	diff := ""
 	message := prettyMessage(commit, refHashToName)
-	(*tw).AppendRow(table.Row{hash, relTime, author, diff, message})
+	return table.Row{hash, relTime, author, diff, message}
 }
 
-func printCommitWithDiff(commit, ancestor *object.Commit, tw *table.Writer, refHashToName map[string][]string) {
+func printCommitWithDiff(
+	commit, ancestor *object.Commit,
+	refHashToName map[string][]string,
+) table.Row {
 	hash := prettyHash(commit)
 	relTime := prettyRelativeTime(commit)
 	author := prettyAuthor(commit)
 	diff := prettyDiff(commit, ancestor)
 	message := prettyMessage(commit, refHashToName)
-	(*tw).AppendRow(table.Row{hash, relTime, author, diff, message})
+	return table.Row{hash, relTime, author, diff, message}
 }
 
 func prettyHash(commit *object.Commit) string {
