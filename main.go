@@ -26,7 +26,11 @@ func main() {
 		os.Exit(1)
 	}
 
-	args, _ := parseArgs(repo)
+	args, err := parseArgs(repo)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "error parsing args: %s\n", err.Error())
+		os.Exit(1)
+	}
 	fmt.Printf("%+v\n", args)
 
 	// Map local branch hashes to branch name
@@ -92,24 +96,27 @@ func (a Args) Parse(repo *git.Repository) (*ParsedArgs, error) {
 	pa := ParsedArgs{numberCommits: a.numberCommits}
 
 	// check if the provided reference is valid
-	var ref *plumbing.Reference
+	var baseCommit *object.Commit
 	if a.baseName == "" {
 		r, err := getBaseBranch(repo)
 		if err != nil {
 			return nil, fmt.Errorf("error getting repo base branch: %w", err)
 		}
-		ref = r
+		commit, err := repo.CommitObject(r.Hash())
+		if err != nil {
+			return nil, fmt.Errorf("error getting base branch commit: %w", err)
+		}
+		baseCommit = commit
 	} else {
-		r, err := repo.Reference(plumbing.ReferenceName(a.baseName), true)
+		hash, err := repo.ResolveRevision(plumbing.Revision(a.baseName))
 		if err != nil {
 			return nil, fmt.Errorf("the provided base %s is invalid: %w", a.baseName, err)
 		}
-		ref = r
-	}
-
-	baseCommit, err := repo.CommitObject(ref.Hash())
-	if err != nil {
-		return nil, fmt.Errorf("error getting base branch commit: %w", err)
+		commit, err := repo.CommitObject(*hash)
+		if err != nil {
+			return nil, fmt.Errorf("error getting provided base %s commit: %w", a.baseName, err)
+		}
+		baseCommit = commit
 	}
 
 	pa.baseCommit = baseCommit
@@ -124,9 +131,21 @@ type ParsedArgs struct {
 func parseArgs(repo *git.Repository) (*ParsedArgs, error) {
 	args := Args{}
 
-	flag.StringVar(&args.baseName, "base", "", "The commit against which to compare")
-	flag.IntVar(&args.numberCommits, "num-commits", 30, "The number of commits to display. Note that a large number will degrade performance")
+	var longBase string
+	flag.StringVar(&longBase, "base", "", "The commit against which to compare")
+	flag.StringVar(&args.baseName, "b", "", "The commit against which to compare")
+	var longNumberCommits int
+	flag.IntVar(&longNumberCommits, "num-commits", 30, "The number of commits to display. Note that a large number will degrade performance")
+	flag.IntVar(&args.numberCommits, "n", 30, "The number of commits to display. Note that a large number will degrade performance")
 	flag.Parse()
+
+	// Prefer the long version if both are provided
+	if longBase != "" {
+		args.baseName = longBase
+	}
+	if longNumberCommits != 0 {
+		args.numberCommits = longNumberCommits
+	}
 
 	return args.Parse(repo)
 }
