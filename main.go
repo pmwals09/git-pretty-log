@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"errors"
+	"flag"
 	"fmt"
 	"io"
 	"os"
@@ -25,17 +26,8 @@ func main() {
 		os.Exit(1)
 	}
 
-	// get the repo base branch reference
-	baseBranch, err := getBaseBranch(repo)
-	if err != nil {
-		fmt.Fprint(os.Stderr, err.Error())
-		os.Exit(1)
-	}
-	baseCommit, err := repo.CommitObject(baseBranch.Hash())
-	if err != nil {
-		fmt.Fprintf(os.Stderr, "error getting base branch commit: %s\n", err.Error())
-		os.Exit(1)
-	}
+	args, _ := parseArgs(repo)
+	fmt.Printf("%+v\n", args)
 
 	// Map local branch hashes to branch name
 	refs, err := repo.References()
@@ -58,7 +50,7 @@ func main() {
 
 	// start walking back 30 commits
 	log, err := repo.Log(&git.LogOptions{})
-	for i := 0; i < 30; i++ {
+	for i := 0; i < args.numberCommits; i++ {
 		commit, err := log.Next()
 		if err != nil {
 			if !errors.Is(err, io.EOF) {
@@ -70,11 +62,11 @@ func main() {
 		}
 
 		// if commit contains master, produce a diff
-		if contains, err := commitContainsCommit(commit, baseCommit); err != nil {
+		if contains, err := commitContainsCommit(commit, args.baseCommit); err != nil {
 			fmt.Fprintf(os.Stderr, "error getting ancestry: %s\n", err.Error())
 			os.Exit(1)
 		} else if contains {
-			printCommitWithDiff(commit, baseCommit, &table, refHashToName)
+			printCommitWithDiff(commit, args.baseCommit, &table, refHashToName)
 		} else {
 			printCommit(commit, &table, refHashToName)
 		}
@@ -89,6 +81,54 @@ func getRepo() (*git.Repository, error) {
 		return nil, err
 	}
 	return git.PlainOpen(wd)
+}
+
+type Args struct {
+	baseName      string
+	numberCommits int
+}
+
+func (a Args) Parse(repo *git.Repository) (*ParsedArgs, error) {
+	pa := ParsedArgs{numberCommits: a.numberCommits}
+
+	// check if the provided reference is valid
+	var ref *plumbing.Reference
+	if a.baseName == "" {
+		r, err := getBaseBranch(repo)
+		if err != nil {
+			return nil, fmt.Errorf("error getting repo base branch: %w", err)
+		}
+		ref = r
+	} else {
+		r, err := repo.Reference(plumbing.ReferenceName(a.baseName), true)
+		if err != nil {
+			return nil, fmt.Errorf("the provided base %s is invalid: %w", a.baseName, err)
+		}
+		ref = r
+	}
+
+	baseCommit, err := repo.CommitObject(ref.Hash())
+	if err != nil {
+		return nil, fmt.Errorf("error getting base branch commit: %w", err)
+	}
+
+	pa.baseCommit = baseCommit
+	return &pa, nil
+}
+
+type ParsedArgs struct {
+	baseCommit    *object.Commit
+	numberCommits int
+}
+
+func parseArgs(repo *git.Repository) (*ParsedArgs, error) {
+	args := Args{}
+
+	flag.StringVar(&args.baseName, "base", "", "The commit against which to compare")
+	flag.IntVar(&args.numberCommits, "num-commits", 30, "The number of commits to display. Note that a large number will degrade performance")
+	flag.Parse()
+
+	return args.Parse(repo)
 }
 
 func getBaseBranch(repo *git.Repository) (*plumbing.Reference, error) {
@@ -166,7 +206,7 @@ func prettyMessage(commit *object.Commit, refHashToName map[string][]string) str
 		for _, rn := range refNames {
 			formattedRefNames = append(formattedRefNames, color.RedString("(%s)", rn))
 		}
-		refName = strings.Join(formattedRefNames, " ")
+		refName = strings.Join(formattedRefNames, "")
 		return fmt.Sprintf("%s %s", refName, strings.TrimSpace(commit.Message))
 	} else {
 		return strings.TrimSpace(commit.Message)
@@ -205,5 +245,5 @@ func prettyDiff(commit, ancestor *object.Commit) string {
 			selectedItems = append(selectedItems, formattedItem)
 		}
 	}
-	return strings.Join(selectedItems, ", ")
+	return strings.Join(selectedItems, ",")
 }
