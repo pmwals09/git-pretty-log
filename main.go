@@ -31,7 +31,6 @@ func main() {
 		fmt.Fprintf(os.Stderr, "error parsing args: %s\n", err.Error())
 		os.Exit(1)
 	}
-	fmt.Printf("%+v\n", args)
 
 	// Map local branch hashes to branch name
 	refs, err := repo.References()
@@ -219,6 +218,8 @@ func prettyAuthor(commit *object.Commit) string {
 	return color.New(color.FgBlue).Add(color.Bold).Sprint(commit.Author.Name)
 }
 func prettyMessage(commit *object.Commit, refHashToName map[string][]string) string {
+	messageLines := strings.SplitN(commit.Message, "\n", 2)
+	message := strings.TrimSpace(messageLines[0])
 	var refName string
 	if refNames, ok := refHashToName[commit.Hash.String()]; ok {
 		formattedRefNames := make([]string, 0, len(refNames))
@@ -226,9 +227,9 @@ func prettyMessage(commit *object.Commit, refHashToName map[string][]string) str
 			formattedRefNames = append(formattedRefNames, color.RedString("(%s)", rn))
 		}
 		refName = strings.Join(formattedRefNames, "")
-		return fmt.Sprintf("%s %s", refName, strings.TrimSpace(commit.Message))
+		return fmt.Sprintf("%s %s", refName, message)
 	} else {
-		return strings.TrimSpace(commit.Message)
+		return message
 	}
 }
 
