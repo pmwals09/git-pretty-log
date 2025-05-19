@@ -5,15 +5,14 @@ import (
 	"errors"
 	"flag"
 	"fmt"
-	"io"
 	"os"
-	"slices"
 	"strings"
 
 	"github.com/fatih/color"
 	"github.com/go-git/go-git/v5"
 	"github.com/go-git/go-git/v5/plumbing"
 	"github.com/go-git/go-git/v5/plumbing/object"
+	"github.com/go-git/go-git/v5/plumbing/storer"
 	"github.com/jedib0t/go-pretty/v6/table"
 	"github.com/maniartech/gotime"
 )
@@ -49,31 +48,37 @@ func main() {
 		return nil
 	})
 
+	head, _ := repo.Head()
+	headCommit, _ := repo.CommitObject(head.Hash())
+	mbCommits, _ := headCommit.MergeBase(args.baseCommit)
+	reachable := true
+	if len(mbCommits) == 0 {
+		reachable = false
+	}
+
 	table := getTableWriter()
 
 	// start walking back 30 commits
 	log, err := repo.Log(&git.LogOptions{})
-	for i := 0; i < args.numberCommits; i++ {
-		commit, err := log.Next()
-		if err != nil {
-			if !errors.Is(err, io.EOF) {
-				fmt.Fprintf(os.Stderr, "error walking log: %s", err.Error())
-				os.Exit(1)
-			} else {
-				break
-			}
+	count := args.numberCommits
+
+	log.ForEach(func(commit *object.Commit) error {
+		if commit.Hash.String() == args.baseCommit.Hash.String() {
+			reachable = false
 		}
+		if count == 0 {
+			return storer.ErrStop
+		}
+		count--
 
 		// if commit contains master, produce a diff
-		if contains, err := commitContainsCommit(commit, args.baseCommit); err != nil {
-			fmt.Fprintf(os.Stderr, "error getting ancestry: %s\n", err.Error())
-			os.Exit(1)
-		} else if contains {
+		if reachable {
 			printCommitWithDiff(commit, args.baseCommit, &table, refHashToName)
 		} else {
 			printCommit(commit, &table, refHashToName)
 		}
-	}
+		return nil
+	})
 
 	table.Render()
 }
@@ -164,19 +169,9 @@ func getBaseBranch(repo *git.Repository) (*plumbing.Reference, error) {
 	return nil, errors.New("unable to find base branch among \"main\" or \"master\"")
 }
 
-func commitContainsCommit(descendant, ancestor *object.Commit) (bool, error) {
-	mb, err := descendant.MergeBase(ancestor)
-	if err != nil {
-		return false, err
-	}
-	if len(mb) == 0 {
-		return false, nil
-	}
-
-	contains := slices.ContainsFunc(mb, func(m *object.Commit) bool {
-		return m.Hash == ancestor.Hash
-	})
-	return contains, nil
+func commitContainsCommit(descendant *object.Commit, reachable map[plumbing.Hash]struct{}) (bool, error) {
+	_, ok := reachable[descendant.Hash]
+	return ok, nil
 }
 
 func getTableWriter() table.Writer {
@@ -233,12 +228,6 @@ func prettyMessage(commit *object.Commit, refHashToName map[string][]string) str
 	}
 }
 
-type DiffItem struct {
-	value int
-	token rune
-	color *color.Color
-}
-
 func prettyDiff(commit, ancestor *object.Commit) string {
 	commitTree, _ := commit.Tree()
 	ancestorTree, _ := ancestor.Tree()
@@ -253,17 +242,16 @@ func prettyDiff(commit, ancestor *object.Commit) string {
 		totalAdded += s.Addition
 		totalDeleted += s.Deletion
 	}
-	items := []DiffItem{
-		{value: totalFiles, token: '~', color: color.New(color.FgYellow)},
-		{value: totalAdded, token: '+', color: color.New(color.FgGreen)},
-		{value: totalDeleted, token: '-', color: color.New(color.FgRed)},
+
+	parts := make([]string, 0, 3)
+	if totalFiles > 0 {
+		parts = append(parts, color.YellowString("%d(~)", totalFiles))
 	}
-	selectedItems := make([]string, 0, 3)
-	for _, item := range items {
-		if item.value > 0 {
-			formattedItem := item.color.Sprintf("%d(%c)", item.value, item.token)
-			selectedItems = append(selectedItems, formattedItem)
-		}
+	if totalAdded > 0 {
+		parts = append(parts, color.GreenString("%d(+)", totalAdded))
 	}
-	return strings.Join(selectedItems, ",")
+	if totalDeleted > 0 {
+		parts = append(parts, color.RedString("%d(-)", totalDeleted))
+	}
+	return strings.Join(parts, ",")
 }
