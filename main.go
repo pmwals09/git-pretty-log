@@ -6,7 +6,10 @@ import (
 	"flag"
 	"fmt"
 	"os"
+	"runtime"
 	"strings"
+
+	"runtime/pprof"
 
 	"github.com/fatih/color"
 	"github.com/go-git/go-git/v5"
@@ -18,18 +21,23 @@ import (
 )
 
 func main() {
-	// make sure we're in some repository
-	repo, err := getRepo()
+	runtime.SetCPUProfileRate(500)
+	f, err := os.Create("cpu.prof")
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "are you sure you're in a repository? %s\n", err.Error())
-		os.Exit(1)
+		panic(err)
 	}
-
-	args, err := parseArgs(repo)
+	pprof.StartCPUProfile(f)
+	defer func() {
+		pprof.StopCPUProfile()
+		f.Close()
+	}()
+	// make sure we're in some repository
+	args, err := parseArgs()
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "error parsing args: %s\n", err.Error())
 		os.Exit(1)
 	}
+	repo := args.repo
 
 	// Map local branch hashes to branch name
 	refs, err := repo.References()
@@ -62,6 +70,7 @@ func main() {
 	log, err := repo.Log(&git.LogOptions{})
 	count := args.numberCommits
 
+	ancestor, _ := args.baseCommit.Tree()
 	log.ForEach(func(commit *object.Commit) error {
 		if commit.Hash.String() == args.baseCommit.Hash.String() {
 			reachable = false
@@ -73,7 +82,7 @@ func main() {
 
 		// if commit contains master, produce a diff
 		if reachable {
-			printCommitWithDiff(commit, args.baseCommit, &table, refHashToName)
+			printCommitWithDiff(commit, ancestor, &table, refHashToName)
 		} else {
 			printCommit(commit, &table, refHashToName)
 		}
@@ -83,21 +92,20 @@ func main() {
 	table.Render()
 }
 
-func getRepo() (*git.Repository, error) {
-	wd, err := os.Getwd()
-	if err != nil {
-		return nil, err
-	}
-	return git.PlainOpen(wd)
-}
-
 type Args struct {
 	baseName      string
 	numberCommits int
+	repoPath      string
 }
 
-func (a Args) Parse(repo *git.Repository) (*ParsedArgs, error) {
+func (a Args) Parse() (*ParsedArgs, error) {
 	pa := ParsedArgs{numberCommits: a.numberCommits}
+
+	repo, err := git.PlainOpen(a.repoPath)
+	if err != nil {
+		return nil, err
+	}
+	pa.repo = repo
 
 	// check if the provided reference is valid
 	var baseCommit *object.Commit
@@ -130,11 +138,20 @@ func (a Args) Parse(repo *git.Repository) (*ParsedArgs, error) {
 type ParsedArgs struct {
 	baseCommit    *object.Commit
 	numberCommits int
+	repo          *git.Repository
 }
 
-func parseArgs(repo *git.Repository) (*ParsedArgs, error) {
+func parseArgs() (*ParsedArgs, error) {
 	args := Args{}
 
+	wd, err := os.Getwd()
+	if err != nil {
+		return nil, err
+	}
+
+	var longRepo string
+	flag.StringVar(&longRepo, "repo-path", wd, "The path of the git repository")
+	flag.StringVar(&args.repoPath, "r", wd, "The path of the git repository")
 	var longBase string
 	flag.StringVar(&longBase, "base", "", "The commit against which to compare")
 	flag.StringVar(&args.baseName, "b", "", "The commit against which to compare")
@@ -147,11 +164,14 @@ func parseArgs(repo *git.Repository) (*ParsedArgs, error) {
 	if longBase != "" {
 		args.baseName = longBase
 	}
+	if longRepo != wd {
+		args.repoPath = longRepo
+	}
 	if longNumberCommits != 0 {
 		args.numberCommits = longNumberCommits
 	}
 
-	return args.Parse(repo)
+	return args.Parse()
 }
 
 func getBaseBranch(repo *git.Repository) (*plumbing.Reference, error) {
@@ -194,7 +214,7 @@ func printCommit(commit *object.Commit, tw *table.Writer, refHashToName map[stri
 	(*tw).AppendRow(table.Row{hash, relTime, author, diff, message})
 }
 
-func printCommitWithDiff(commit, ancestor *object.Commit, tw *table.Writer, refHashToName map[string][]string) {
+func printCommitWithDiff(commit *object.Commit, ancestor *object.Tree, tw *table.Writer, refHashToName map[string][]string) {
 	hash := prettyHash(commit)
 	relTime := prettyRelativeTime(commit)
 	author := prettyAuthor(commit)
@@ -228,10 +248,10 @@ func prettyMessage(commit *object.Commit, refHashToName map[string][]string) str
 	}
 }
 
-func prettyDiff(commit, ancestor *object.Commit) string {
+// TODO: shell out to git diff --shortstat and parallelize
+func prettyDiff(commit *object.Commit, ancestor *object.Tree) string {
 	commitTree, _ := commit.Tree()
-	ancestorTree, _ := ancestor.Tree()
-	changes, _ := object.DiffTreeWithOptions(context.Background(), ancestorTree, commitTree, &object.DiffTreeOptions{DetectRenames: true})
+	changes, _ := object.DiffTreeWithOptions(context.Background(), ancestor, commitTree, &object.DiffTreeOptions{DetectRenames: true})
 	p, _ := changes.Patch()
 	stats := p.Stats()
 	var totalFiles int
