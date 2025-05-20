@@ -1,11 +1,12 @@
 package main
 
 import (
-	"context"
 	"errors"
 	"flag"
 	"fmt"
 	"os"
+	"os/exec"
+	"regexp"
 	"runtime"
 	"strings"
 
@@ -70,7 +71,6 @@ func main() {
 	log, err := repo.Log(&git.LogOptions{})
 	count := args.numberCommits
 
-	ancestor, _ := args.baseCommit.Tree()
 	log.ForEach(func(commit *object.Commit) error {
 		if commit.Hash.String() == args.baseCommit.Hash.String() {
 			reachable = false
@@ -82,7 +82,7 @@ func main() {
 
 		// if commit contains master, produce a diff
 		if reachable {
-			printCommitWithDiff(commit, ancestor, &table, refHashToName)
+			printCommitWithDiff(commit, args.baseCommit, &table, refHashToName, args)
 		} else {
 			printCommit(commit, &table, refHashToName)
 		}
@@ -99,7 +99,7 @@ type Args struct {
 }
 
 func (a Args) Parse() (*ParsedArgs, error) {
-	pa := ParsedArgs{numberCommits: a.numberCommits}
+	pa := ParsedArgs{numberCommits: a.numberCommits, repoPath: a.repoPath}
 
 	repo, err := git.PlainOpen(a.repoPath)
 	if err != nil {
@@ -139,6 +139,7 @@ type ParsedArgs struct {
 	baseCommit    *object.Commit
 	numberCommits int
 	repo          *git.Repository
+	repoPath      string
 }
 
 func parseArgs() (*ParsedArgs, error) {
@@ -189,11 +190,6 @@ func getBaseBranch(repo *git.Repository) (*plumbing.Reference, error) {
 	return nil, errors.New("unable to find base branch among \"main\" or \"master\"")
 }
 
-func commitContainsCommit(descendant *object.Commit, reachable map[plumbing.Hash]struct{}) (bool, error) {
-	_, ok := reachable[descendant.Hash]
-	return ok, nil
-}
-
 func getTableWriter() table.Writer {
 	t := table.NewWriter()
 	t.SetOutputMirror(os.Stdout)
@@ -214,11 +210,12 @@ func printCommit(commit *object.Commit, tw *table.Writer, refHashToName map[stri
 	(*tw).AppendRow(table.Row{hash, relTime, author, diff, message})
 }
 
-func printCommitWithDiff(commit *object.Commit, ancestor *object.Tree, tw *table.Writer, refHashToName map[string][]string) {
+// func printCommitWithDiff(commit *object.Commit, ancestor *object.Tree, tw *table.Writer, refHashToName map[string][]string) {
+func printCommitWithDiff(commit, ancestor *object.Commit, tw *table.Writer, refHashToName map[string][]string, pa *ParsedArgs) {
 	hash := prettyHash(commit)
 	relTime := prettyRelativeTime(commit)
 	author := prettyAuthor(commit)
-	diff := prettyDiff(commit, ancestor)
+	diff := prettyDiff(commit, ancestor, pa)
 	message := prettyMessage(commit, refHashToName)
 	(*tw).AppendRow(table.Row{hash, relTime, author, diff, message})
 }
@@ -248,30 +245,36 @@ func prettyMessage(commit *object.Commit, refHashToName map[string][]string) str
 	}
 }
 
-// TODO: shell out to git diff --shortstat and parallelize
-func prettyDiff(commit *object.Commit, ancestor *object.Tree) string {
-	commitTree, _ := commit.Tree()
-	changes, _ := object.DiffTreeWithOptions(context.Background(), ancestor, commitTree, &object.DiffTreeOptions{DetectRenames: true})
-	p, _ := changes.Patch()
-	stats := p.Stats()
-	var totalFiles int
-	var totalAdded int
-	var totalDeleted int
-	for _, s := range stats {
-		totalFiles++
-		totalAdded += s.Addition
-		totalDeleted += s.Deletion
+var shortstatRE = regexp.MustCompile(`(?:(\d+)\s+files?\s+changed)?(?:,\s+(\d+)\s+insertions?\(\+\))?(?:,\s+(\d+)\s+deletions?\(-\))?`)
+
+func prettyDiff(commit, ancestor *object.Commit, pa *ParsedArgs) string {
+	cmd := exec.Command("git", "diff", "--shortstat", ancestor.Hash.String(), commit.Hash.String())
+	cmd.Dir = pa.repoPath
+	ba, _ := cmd.Output()
+	matches := shortstatRE.FindStringSubmatch(strings.TrimSpace(string(ba)))
+	if len(matches) == 0 {
+		return ""
+	}
+	var totalFiles, totalAdded, totalDeleted string
+	if matches[1] != "" {
+		totalFiles = matches[1]
+	}
+	if matches[2] != "" {
+		totalAdded = matches[2]
+	}
+	if matches[3] != "" {
+		totalDeleted = matches[3]
 	}
 
 	parts := make([]string, 0, 3)
-	if totalFiles > 0 {
-		parts = append(parts, color.YellowString("%d(~)", totalFiles))
+	if totalFiles != "" {
+		parts = append(parts, color.YellowString("%s(~)", totalFiles))
 	}
-	if totalAdded > 0 {
-		parts = append(parts, color.GreenString("%d(+)", totalAdded))
+	if totalAdded != "" {
+		parts = append(parts, color.GreenString("%s(+)", totalAdded))
 	}
-	if totalDeleted > 0 {
-		parts = append(parts, color.RedString("%d(-)", totalDeleted))
+	if totalDeleted != "" {
+		parts = append(parts, color.RedString("%s(-)", totalDeleted))
 	}
 	return strings.Join(parts, ",")
 }
