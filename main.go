@@ -7,10 +7,7 @@ import (
 	"os"
 	"os/exec"
 	"regexp"
-	"runtime"
 	"strings"
-
-	"runtime/pprof"
 
 	"github.com/fatih/color"
 	"github.com/go-git/go-git/v5"
@@ -22,16 +19,6 @@ import (
 )
 
 func main() {
-	runtime.SetCPUProfileRate(500)
-	f, err := os.Create("cpu.prof")
-	if err != nil {
-		panic(err)
-	}
-	pprof.StartCPUProfile(f)
-	defer func() {
-		pprof.StopCPUProfile()
-		f.Close()
-	}()
 	// make sure we're in some repository
 	args, err := parseArgs()
 	if err != nil {
