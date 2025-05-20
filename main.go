@@ -28,36 +28,22 @@ func main() {
 	repo := args.repo
 
 	// Map local branch hashes to branch name
-	refs, err := repo.References()
+	refHashToName, err := makeHashToNameMap(repo)
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "error getting repo references: %s\n", err.Error())
+		fmt.Fprintf(os.Stderr, "error mapping ref hashes to names: %s\n", err.Error())
 		os.Exit(1)
 	}
-	refHashToName := make(map[string][]string)
-	refs.ForEach(func(r *plumbing.Reference) error {
-		refHash := r.Hash().String()
-		if _, ok := refHashToName[refHash]; ok {
-			refHashToName[refHash] = append(refHashToName[refHash], r.Name().Short())
-		} else {
-			refHashToName[refHash] = []string{r.Name().Short()}
-		}
-		return nil
-	})
 
-	head, _ := repo.Head()
-	headCommit, _ := repo.CommitObject(head.Hash())
-	mbCommits, _ := headCommit.MergeBase(args.baseCommit)
-	reachable := true
-	if len(mbCommits) == 0 {
-		reachable = false
+	reachable, err := isBaseReachableFromHead(repo, args)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "error determining reachability of base branch: %s\n", err.Error())
 	}
 
-	table := getTableWriter()
+	tw := getTableWriter()
 
-	// start walking back 30 commits
+	// start walking back n commits
 	log, err := repo.Log(&git.LogOptions{})
 	count := args.numberCommits
-
 	log.ForEach(func(commit *object.Commit) error {
 		if commit.Hash.String() == args.baseCommit.Hash.String() {
 			reachable = false
@@ -69,14 +55,14 @@ func main() {
 
 		// if commit contains master, produce a diff
 		if reachable {
-			printCommitWithDiff(commit, args.baseCommit, &table, refHashToName, args)
+			printCommitWithDiff(commit, args.baseCommit, &tw, refHashToName, args)
 		} else {
-			printCommit(commit, &table, refHashToName)
+			printCommit(commit, &tw, refHashToName)
 		}
 		return nil
 	})
 
-	table.Render()
+	tw.Render()
 }
 
 type Args struct {
@@ -175,6 +161,44 @@ func getBaseBranch(repo *git.Repository) (*plumbing.Reference, error) {
 	}
 
 	return nil, errors.New("unable to find base branch among \"main\" or \"master\"")
+}
+
+func makeHashToNameMap(repo *git.Repository) (map[string][]string, error) {
+	refs, err := repo.References()
+	if err != nil {
+		return nil, err
+	}
+	refHashToName := make(map[string][]string)
+	refs.ForEach(func(r *plumbing.Reference) error {
+		refHash := r.Hash().String()
+		if _, ok := refHashToName[refHash]; ok {
+			refHashToName[refHash] = append(refHashToName[refHash], r.Name().Short())
+		} else {
+			refHashToName[refHash] = []string{r.Name().Short()}
+		}
+		return nil
+	})
+	return refHashToName, nil
+}
+
+func isBaseReachableFromHead(repo *git.Repository, args *ParsedArgs) (bool, error) {
+	head, err := repo.Head()
+	if err != nil {
+		return false, err
+	}
+	headCommit, err := repo.CommitObject(head.Hash())
+	if err != nil {
+		return false, err
+	}
+	mbCommits, err := headCommit.MergeBase(args.baseCommit)
+	if err != nil {
+		return false, err
+	}
+	reachable := true
+	if len(mbCommits) == 0 {
+		reachable = false
+	}
+	return reachable, nil
 }
 
 func getTableWriter() table.Writer {
