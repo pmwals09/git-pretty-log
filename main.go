@@ -69,10 +69,17 @@ type Args struct {
 	baseName      string
 	numberCommits int
 	repoPath      string
+	exclude       stringlist
 }
 
 func (a Args) Parse() (*ParsedArgs, error) {
 	pa := ParsedArgs{numberCommits: a.numberCommits, repoPath: a.repoPath}
+	pa.exclude = make([]string, 0)
+	for _, pathspec := range a.exclude {
+		if pathspec != "" {
+			pa.exclude = append(pa.exclude, pathspec)
+		}
+	}
 
 	repo, err := git.PlainOpen(a.repoPath)
 	if err != nil {
@@ -113,6 +120,17 @@ type ParsedArgs struct {
 	numberCommits int
 	repo          *git.Repository
 	repoPath      string
+	exclude       []string
+}
+
+type stringlist []string
+
+func (s *stringlist) String() string {
+	return strings.Join(*s, ", ")
+}
+func (s *stringlist) Set(value string) error {
+	*s = append(*s, value)
+	return nil
 }
 
 func parseArgs() (*ParsedArgs, error) {
@@ -132,6 +150,9 @@ func parseArgs() (*ParsedArgs, error) {
 	var longNumberCommits int
 	flag.IntVar(&longNumberCommits, "num-commits", 30, "The number of commits to display. Note that a large number will degrade performance")
 	flag.IntVar(&args.numberCommits, "n", 30, "The number of commits to display. Note that a large number will degrade performance")
+	var longExclude stringlist
+	flag.Var(&longExclude, "exclude", "a valid [pathspec](https://git-scm.com/docs/gitglossary#Documentation/gitglossary.txt-aiddefpathspecapathspec) to exclude from diffing calculations; can be repeated")
+	flag.Var(&args.exclude, "e", "a valid [pathspec](https://git-scm.com/docs/gitglossary#Documentation/gitglossary.txt-aiddefpathspecapathspec) to exclude from diffing calculations; can be repeated")
 	flag.Parse()
 
 	// Prefer the long version if both are provided
@@ -143,6 +164,11 @@ func parseArgs() (*ParsedArgs, error) {
 	}
 	if longNumberCommits != 0 {
 		args.numberCommits = longNumberCommits
+	}
+	if len(longExclude) > 0 {
+		for _, pathspec := range longExclude {
+			args.exclude = append(args.exclude, pathspec)
+		}
 	}
 
 	return args.Parse()
@@ -221,12 +247,11 @@ func printCommit(commit *object.Commit, tw *table.Writer, refHashToName map[stri
 	(*tw).AppendRow(table.Row{hash, relTime, author, diff, message})
 }
 
-// func printCommitWithDiff(commit *object.Commit, ancestor *object.Tree, tw *table.Writer, refHashToName map[string][]string) {
 func printCommitWithDiff(commit, ancestor *object.Commit, tw *table.Writer, refHashToName map[string][]string, pa *ParsedArgs) {
 	hash := prettyHash(commit)
 	relTime := prettyRelativeTime(commit)
 	author := prettyAuthor(commit)
-	diff := prettyDiff(commit, ancestor, pa)
+	diff, _ := prettyDiff(commit, ancestor, pa)
 	message := prettyMessage(commit, refHashToName)
 	(*tw).AppendRow(table.Row{hash, relTime, author, diff, message})
 }
@@ -258,13 +283,27 @@ func prettyMessage(commit *object.Commit, refHashToName map[string][]string) str
 
 var shortstatRE = regexp.MustCompile(`(?:(\d+)\s+files?\s+changed)?(?:,\s+(\d+)\s+insertions?\(\+\))?(?:,\s+(\d+)\s+deletions?\(-\))?`)
 
-func prettyDiff(commit, ancestor *object.Commit, pa *ParsedArgs) string {
-	cmd := exec.Command("git", "diff", "--shortstat", ancestor.Hash.String(), commit.Hash.String())
+func prettyDiff(commit, ancestor *object.Commit, pa *ParsedArgs) (string, error) {
+	args := []string{
+		"diff",
+		"--shortstat",
+		ancestor.Hash.String(),
+		commit.Hash.String(),
+		"--",
+		".",
+	}
+	for _, pathspec := range pa.exclude {
+		args = append(args, fmt.Sprintf(":^%s", pathspec))
+	}
+	cmd := exec.Command("git", args...)
 	cmd.Dir = pa.repoPath
-	ba, _ := cmd.Output()
+	ba, err := cmd.Output()
+	if err != nil {
+		return "", err
+	}
 	matches := shortstatRE.FindStringSubmatch(strings.TrimSpace(string(ba)))
 	if len(matches) == 0 {
-		return ""
+		return "", nil
 	}
 	var totalFiles, totalAdded, totalDeleted string
 	if matches[1] != "" {
@@ -287,5 +326,5 @@ func prettyDiff(commit, ancestor *object.Commit, pa *ParsedArgs) string {
 	if totalDeleted != "" {
 		parts = append(parts, color.RedString("%s(-)", totalDeleted))
 	}
-	return strings.Join(parts, ",")
+	return strings.Join(parts, ","), nil
 }
