@@ -18,53 +18,6 @@ import (
 	"github.com/maniartech/gotime"
 )
 
-func main() {
-	// make sure we're in some repository
-	args, err := parseArgs()
-	if err != nil {
-		fmt.Fprintf(os.Stderr, "error parsing args: %s\n", err.Error())
-		os.Exit(1)
-	}
-	repo := args.repo
-
-	// Map local branch hashes to branch name
-	refHashToName, err := makeHashToNameMap(repo)
-	if err != nil {
-		fmt.Fprintf(os.Stderr, "error mapping ref hashes to names: %s\n", err.Error())
-		os.Exit(1)
-	}
-
-	reachable, err := isBaseReachableFromHead(repo, args)
-	if err != nil {
-		fmt.Fprintf(os.Stderr, "error determining reachability of base branch: %s\n", err.Error())
-	}
-
-	tw := getTableWriter()
-
-	// start walking back n commits
-	log, err := repo.Log(&git.LogOptions{})
-	count := args.numberCommits
-	log.ForEach(func(commit *object.Commit) error {
-		if commit.Hash.String() == args.baseCommit.Hash.String() {
-			reachable = false
-		}
-		if count == 0 {
-			return storer.ErrStop
-		}
-		count--
-
-		// if commit contains master, produce a diff
-		if reachable {
-			printCommitWithDiff(commit, args.baseCommit, &tw, refHashToName, args)
-		} else {
-			printCommit(commit, &tw, refHashToName)
-		}
-		return nil
-	})
-
-	tw.Render()
-}
-
 type Args struct {
 	baseName      string
 	numberCommits int
@@ -133,6 +86,56 @@ func (s *stringlist) Set(value string) error {
 	return nil
 }
 
+func main() {
+	// make sure we're in some repository
+	args, err := parseArgs()
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "error parsing args: %s\n", err.Error())
+		os.Exit(1)
+	}
+	repo := args.repo
+
+	// Map local branch hashes to branch name
+	refHashToName, err := makeHashToNameMap(repo)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "error mapping ref hashes to names: %s\n", err.Error())
+		os.Exit(1)
+	}
+
+	reachable, err := isBaseReachableFromHead(repo, args)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "error determining reachability of base branch: %s\n", err.Error())
+	}
+
+	tw := getTableWriter()
+
+	// start walking back n commits
+	log, err := repo.Log(&git.LogOptions{})
+	count := args.numberCommits
+	log.ForEach(func(commit *object.Commit) error {
+		if commit.Hash.String() == args.baseCommit.Hash.String() {
+			reachable = false
+		}
+		if count == 0 {
+			return storer.ErrStop
+		}
+		count--
+
+		// if commit contains master, produce a diff
+		if reachable {
+			printCommitWithDiff(commit, args.baseCommit, &tw, refHashToName, args)
+		} else {
+			printCommit(commit, &tw, refHashToName)
+		}
+		return nil
+	})
+
+	tw.Render()
+}
+
+var validModes = []string{"base", "branch", "commit"}
+
+
 func parseArgs() (*ParsedArgs, error) {
 	args := Args{}
 
@@ -144,15 +147,19 @@ func parseArgs() (*ParsedArgs, error) {
 	var longRepo string
 	flag.StringVar(&longRepo, "repo-path", wd, "The path of the git repository")
 	flag.StringVar(&args.repoPath, "r", wd, "The path of the git repository")
+
 	var longBase string
 	flag.StringVar(&longBase, "base", "", "The commit against which to compare")
 	flag.StringVar(&args.baseName, "b", "", "The commit against which to compare")
+
 	var longNumberCommits int
 	flag.IntVar(&longNumberCommits, "num-commits", 30, "The number of commits to display. Note that a large number will degrade performance")
 	flag.IntVar(&args.numberCommits, "n", 30, "The number of commits to display. Note that a large number will degrade performance")
+
 	var longExclude stringlist
 	flag.Var(&longExclude, "exclude", "a valid [pathspec](https://git-scm.com/docs/gitglossary#Documentation/gitglossary.txt-aiddefpathspecapathspec) to exclude from diffing calculations; can be repeated")
 	flag.Var(&args.exclude, "e", "a valid [pathspec](https://git-scm.com/docs/gitglossary#Documentation/gitglossary.txt-aiddefpathspecapathspec) to exclude from diffing calculations; can be repeated")
+
 	flag.Parse()
 
 	// Prefer the long version if both are provided
